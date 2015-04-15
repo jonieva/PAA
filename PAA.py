@@ -19,6 +19,7 @@ conda install opencv
 
 import nrrd
 import os
+import math
 import SimpleITK as sitk
 
 import matplotlib.pyplot as plt
@@ -32,7 +33,9 @@ import cv2.cv
 #   def __init__(self):
 #     pass
 
-
+Z=2
+Y=1
+X=0
 
 def extractAxialSlice(filePath, sliceNumber):
   ct_data, imageInfo = nrrd.read(filePath)
@@ -43,8 +46,8 @@ def extractAxialSlice(filePath, sliceNumber):
   nrrd.write(outputFilePath, ct_data_slice)
 
 
-def plot(image):
-  array = sitk.GetArrayFromImage(image)
+def plot(imageArray):
+  array = sitk.GetArrayFromImage(imageArray)
   plota(array)
 
 def plota(array):
@@ -53,8 +56,8 @@ def plota(array):
   refresh()
   return f.number
 
-def arr(image):
-  return sitk.GetArrayFromImage(image)
+def arr(imageArray):
+  return sitk.GetArrayFromImage(imageArray)
 
 def cl():
   plt.close('all')
@@ -70,15 +73,15 @@ def refresh(interval=0.1):
 
 
 
-# Read main image
+# Read main imageArray
 # inputImagePath = '/Users/Jorge/tempdata/12257B_INSP_STD_UIA_COPD_Easy1.png'
 # imageVector = sitk.ReadImage(inputImagePath)
-# image=sitk.VectorIndexSelectionCast(imageVector)
+# imageArray=sitk.VectorIndexSelectionCast(imageVector)
 
 
 
 def readImages(imageName, labelmapName, dataFolder, slice):
-  """Read a slice from the original image and the label map.
+  """Read a slice from the original imageArray and the label map.
   It returns a tuple like:
   - OriginalImage
   - OriginalLabelmap
@@ -86,71 +89,69 @@ def readImages(imageName, labelmapName, dataFolder, slice):
   - LabelmapArray
   """
   inputImagePath = dataFolder + imageName
-  image = sitk.ReadImage(inputImagePath)
-  image = image[:,:,slice]
+  imageArray = sitk.ReadImage(inputImagePath)
+  imageArray = imageArray[:,:,slice]
 
   seedImagePath = dataFolder + labelmapName
   labelmapImage = sitk.ReadImage(seedImagePath)
   labelmapImage = labelmapImage[:,:,slice]
 
-  return (image, labelmapImage, sitk.GetArrayFromImage(image), sitk.GetArrayFromImage(labelmapImage))
+  return (imageArray, labelmapImage, sitk.GetArrayFromImage(imageArray), sitk.GetArrayFromImage(labelmapImage))
 
-def generateSeed(image):
-  ''' Return a sitk image with a seed starting from the middle of the image
+def generateSeed(image, seedIndex):
+  ''' Return a sitk image with a seedIndex starting from the middle of the image
   :param image:
   :return:
   '''
   imSize = image.GetSize()
-  idx = (imSize[0]/2,imSize[1]/2)
-  seed = sitk.Image(imSize, sitk.sitkUInt8)
-  seed.CopyInformation(image)
-  seed[idx] = 1
-  seed = sitk.BinaryDilate(seed, 3)
-  return seed
+  seedImage = sitk.Image(imSize, sitk.sitkUInt8)
+  seedImage.CopyInformation(image)
+  seedImage[seedIndex] = 1
+  seedIndex = sitk.BinaryDilate(seedImage, 3)
+  return seedIndex
 
 def preprocessImage(img):
-  """Apply a filter to preprocess the image (median, gausian, etc.).
-  It returns the filtered image."""
+  """Apply a filter to preprocess the imageArray (median, gausian, etc.).
+  It returns the filtered imageArray."""
   filter = sitk.MedianImageFilter()
   img = filter.Execute(img)
   return img
 
 
-def growSeed(image, labelmap):
+def applyLevelset(image, labelmap, numberOfIterations, curvatureScaling, propagationScaling, lowerThreshold, upperThreshold, maximumRMSError):
   ''' Apply a region growing algorithm to grow the initial seed.
-  :param image: original or preprocessed image
-  :param seed: coordinates of the seed/s (ex: [(290,254]) )
-  :return: a labelmap image with the same size as 'image' and value=1 in the grown region
+  :param imageArray: original or preprocessed imageArray
+  :return: a labelmap imageArray with the same size as 'imageArray' and value=1 in the grown region
   '''
-  # img = sitk.ConnectedThreshold(image1=image,
+  # img = sitk.ConnectedThreshold(image1=imageArray,
   #                                             seedList=seeds,
   #                                             lower=0,
   #                                             upper=300,
   #                                             replaceValue=1)
   init_ls = sitk.SignedMaurerDistanceMap(labelmap, insideIsPositive=True, useImageSpacing=True)
   lsFilter = sitk.ThresholdSegmentationLevelSetImageFilter()
-  lsFilter.SetLowerThreshold(0)
-  lsFilter.SetUpperThreshold(300)
+  lsFilter.SetLowerThreshold(lowerThreshold)
+  lsFilter.SetUpperThreshold(upperThreshold)
   # Additional parameters
   lsFilter.SetMaximumRMSError(maximumRMSError)
-  lsFilter.SetNumberOfIterations(iterations)
+  lsFilter.SetNumberOfIterations(numberOfIterations)
   lsFilter.SetCurvatureScaling(curvatureScaling)
   lsFilter.SetPropagationScaling(propagationScaling)
   lsFilter.ReverseExpansionDirectionOn()
 
-  im = lsFilter.Execute()
+  im = lsFilter.Execute(init_ls, sitk.Cast(image, sitk.sitkFloat32))
   return im > 0
 
-def getImageStats(image, labelmap):
-  """Get some standard stats for the image"""
+def getImageStats(imageArray, labelmap):
+  """Get some standard stats for the imageArray"""
   stats = sitk.LabelStatisticsImageFilter()
-  stats.Execute(image, labelmap)
+  stats.Execute(imageArray, labelmap)
   return stats
 
 
 
-def applyLevelSet(image, labelmap, curvatureScaling, propagationScaling, iterations, maximumRMSError, lower_threshold, upper_threshold):
-  """Apply a levelset with 'image' and 'labelmap' and return a result image"""
+def applyLevelSet(imageArray, labelmap, curvatureScaling, propagationScaling, iterations, maximumRMSError, lower_threshold, upper_threshold):
+  """Apply a levelset with 'imageArray' and 'labelmap' and return a result imageArray"""
   # Init distances
   init_ls = sitk.SignedMaurerDistanceMap(labelmap, insideIsPositive=True, useImageSpacing=True)
 
@@ -166,95 +167,23 @@ def applyLevelSet(image, labelmap, curvatureScaling, propagationScaling, iterati
   lsFilter.ReverseExpansionDirectionOn()
 
   # Execute filter
-  resultImage = lsFilter.Execute(init_ls, sitk.Cast(image, sitk.sitkFloat32))
+  resultImage = lsFilter.Execute(init_ls, sitk.Cast(imageArray, sitk.sitkFloat32))
   return resultImage
 
 
-
-
-
-def detectCircles(image, topleftY=0, topleftX=0, height=0, width=0):
-  border = 5
-  if height == 0 or width==0:
-    croppedImage = image
-  else:
-    croppedImage = image[topleftY-border:topleftY+height+border, topleftX:topleftX+width+border]
-
-  # Convert the image to a uint8 array that opencv can handle
-  imgRescaled = sitk.RescaleIntensity(croppedImage, sitk.sitkUInt8)
-  imgArray = sitk.GetArrayFromImage(imgRescaled)
-  imgArray = imgArray.astype('uint8')
-
-  # Smoothing
-  #imgArray = cv2.medianBlur(imgArray,5)
-  # Negative
-  imgArray = 255 - imgArray
-  # circles = cv2.HoughCircles(croppedImage,cv2.CV_HOUGH_GRADIENT,1,80,
-  # param1=10,param2=5,minRadius=3,maxRadius=10)
-  circles = cv2.HoughCircles(imgArray, cv2.cv.CV_HOUGH_GRADIENT, 1,50, param1=5,param2=5,minRadius=5,maxRadius=100)
-
-
-
-
-
-  # rect is defined as [z,x,y,w,h]
-def detectAorta(image):
-  ''' Detect the aorta in a filtered slice
-  :param imgArray: numpy array in 2D
-  :return: label map where aorta=1
-  '''
-  # Approx. coordinates where the Aorta should be contained, having in mind that numpy arrays have [zyx] coordinates.
-  topleftY = 180
-  topleftX = 190
-  height = 95
-  width = 100
-  border=5
-
-  #cimg = cv2.cvtColor(imgArray,cv2.COLOR_GRAY2BGR)
-  # Crop the image to fit the aorta bounding box aprox.
-  #croppedImage = imgArray[topleftY-border:(rect[0]+rect[2]-border), rect[1]+border:(rect[1]+rect[3]-border)]
-  croppedImage = image[topleftY-border:topleftY+height+border, topleftX:topleftX+width+border]
-
-  # Convert the image to a uint8 array that opencv can handle
-  imgRescaled = sitk.RescaleIntensity(croppedImage, sitk.sitkUInt8)
-  imgArray = sitk.GetArrayFromImage(imgRescaled)
-  imgArray = imgArray.astype('uint8')
-
-  # Smoothing
-  #imgArray = cv2.medianBlur(imgArray,5)
-  # Negative
-  #imgArray = 255 - imgArray
-  plota(imgArray)
-  cl(); canny = cv2.Canny(th, 30, 30, 3);plota(canny)
-
-  # circles = cv2.HoughCircles(croppedImage,cv2.CV_HOUGH_GRADIENT,1,80,
-  # param1=10,param2=5,minRadius=3,maxRadius=10)
-  circles = cv2.HoughCircles(th, cv2.cv.CV_HOUGH_GRADIENT, 1,600, param1=30,param2=5,minRadius=10,maxRadius=100)
-
-  cimg = imgArray
-
-  if not circles is None:
-    circles = np.uint16(np.around(circles))
-    for i in circles[0,:]:
-      # draw the outer circle
-      cv2.circle(cimg,(i[0]+topleftY+border,i[1]+topleftY+border),i[2],(0,255,0),2)
-      # draw the center of the circle
-      cv2.circle(cimg,(i[0]+topleftX+border,i[1]+topleftX+border),2,(0,0,255),3)
-    #cv2.imwrite(outputName, cimg)
-    plota(cimg)
 
 def displayResults(originalImage, labelmap, resultImage, imageName='', labelmapName='', skeletonImage=None, iterations=0, curvature=0, propagation=0):
   # Display results
   fig, axes = plt.subplots(nrows=1, ncols=2)
 
-  # Show original image and the starting labelmap
+  # Show original imageArray and the starting labelmap
   castedImage = sitk.Cast(sitk.RescaleIntensity(originalImage), labelmap.GetPixelID())
   im = sitk.LabelOverlay(castedImage, labelmap)
   #axes[0].imshow(sitk.GetArrayFromImage(sitk.LabelOverlay(originalImage, labelmap > 0)))
   axes[0].imshow(sitk.GetArrayFromImage(im))
   axes[0].set_title('Seed')
 
-  # Show original image and the result of the levelset
+  # Show original imageArray and the result of the levelset
   castedResult = sitk.Cast(sitk.RescaleIntensity(resultImage), labelmap.GetPixelID())
   im = sitk.LabelOverlay(castedImage, castedResult)
   axes[1].imshow(sitk.GetArrayFromImage(im))
@@ -273,8 +202,8 @@ def displayResults(originalImage, labelmap, resultImage, imageName='', labelmapN
   # refresh()
 
 # idx = (552,432)
-# seg = sitk.Image(image.GetSize(), sitk.sitkUInt8)
-# seg.CopyInformation(image)
+# seg = sitk.Image(imageArray.GetSize(), sitk.sitkUInt8)
+# seg.CopyInformation(imageArray)
 # seg[idx] = 1
 # seg = sitk.BinaryDilate(seg, 3)
 
@@ -283,120 +212,211 @@ def displayResults(originalImage, labelmap, resultImage, imageName='', labelmapN
 #print(stats)
 #
 
-
-#dataFolder = '/Data/jonieva/tempdata/'
-#imageName='12257B_INSP_STD_UIA_COPD.nhdr'
-#labelmapName='12257B_INSP_STD_UIA_COPD-label.nrrd'
-#slice=448
-
-imageName='/Volumes/Mac500/Dropbox/ACIL-Biomarkers/BiomarkerHackathon/10002K_INSP_STD_BWH_COPD_PulmonaryArteryBifurcationAxial_slice.nhdr'
-slice=0
-
-
-originalImage = sitk.ReadImage(imageName)[:,:,0]
-originalLabelmap = generateSeed(originalImage)
-#imgs = [originalImage, originalLabelmap, sitk.GetArrayFromImage(originalImage), sitk.GetArrayFromImage(originalLabelmap)]
-
-# Read the image and the label map used as a seed. It returns: (image, labelmap, imageArray, labelmapArray)
-#imgs = readImages(imageName, labelmapName, dataFolder, slice)
-#originalImage = imgs[0]
-# Set manually a value as a seed. I don't know why it's not saved in Slicer
-#imgs[1][290,240] = 1
-#originalLabelmap = imgs[1]
-
-
-# Preprocess the image
-image = preprocessImage(originalImage)
-#labelmap = growSeed(image, [(290,240)])
-#labelmap = growSeed(image, originalLabelmap)
-labelmap = originalLabelmap
-
-
-
-
-factor = 1.5
-iterations=100
-maximumRMSError = 0.02
-
-curvatureScaling = 1
-propagationScaling = 1
-
-# Set thresholds for a bigger/smaller segmented area
-# stats = getImageStats(image, labelmap)
-# lower_threshold = stats.GetMean(1)-factor*stats.GetSigma(1)
-# upper_threshold = stats.GetMean(1)+factor*stats.GetSigma(1)
-lower_threshold = 0
-upper_threshold = 300
-
-
-#def getCirclesGerman(image):
-  #originalImageArray = sitk.GetArrayFromImage(image)
- # img = np.squeeze(originalImageArray).T
-def adaptIntensities(image):
-  ''' Adapt the intensities of an image and convert to 255
-  :param image:
+def adaptIntensities(imageArray):
+  ''' Adapt the intensities of an imageArray and convert to 255
+  :param imageArray:
   :return:
   '''
 #img = sitk.GetArrayFromImage(originalImage)
-  image[image <= -150] = -150;
-  image[ image >= 150] = 150;
-  image = 254*(image.astype(np.float32)-150)/300
-  image = image.astype(np.uint8)
+  thresholdMin = -150
+  thresholdMax = 250
+  imageArray[imageArray <= thresholdMin] = thresholdMin
+  imageArray[imageArray >= thresholdMax] = thresholdMax
+  imageArray = 254*(imageArray.astype(np.float32)-thresholdMin)/(thresholdMax-thresholdMin)
+#   imageArray[sitk.RescaleIntensity(sitk.sitkUInt8)]
+  imageArray = imageArray.astype(np.uint8)
 
-  return image
+  return imageArray
 
-def detectAorta(image, seedX, seedY):
+def detectAorta(imageArray, boundingBoxMin, boundingBoxMax, seed):
   ''' Detect aorta
-  :param image: whole image in 255 gray levels
+  :param imageArray: whole imageArray in 255 gray levels
   :param seedY: y coord of a seed inside the circle
   :param seedX: x coord of a seed inside the circle
-  :return:
+  :return: tuple (CenterX,CenterY,ratio) for the circle. None if it doesn't find it
   '''
 
-  image = cv2.medianBlur(image,5)
+  # Crop the imageArray (2D)
+  img = imageArray[boundingBoxMin[Y]:boundingBoxMax[Y], boundingBoxMin[X]:boundingBoxMax[X]]
+  img = cv2.medianBlur(img,5)
 
+  #img = cv2.cvtColor(img,cv2.COLOR_GRAY2BGR)
   #canny = cv2.Canny(img, 100, 100); plota(canny)
 
-  circles = cv2.HoughCircles(image,cv2.cv.CV_HOUGH_GRADIENT,1,100,param1=100,param2=10,minRadius=10,maxRadius=60)
+  # Get all the circles (each circle is an array [X, Y, ratio]
+  circles = cv2.HoughCircles(img,cv2.cv.CV_HOUGH_GRADIENT,1,100,param1=100,param2=10,minRadius=10,maxRadius=aortaMaxRadius)
+
+  # Draw circles (debugging purposese)
+  #imageArrayWithAorta = img.copy()
+  #drawCircles(imageArrayWithAorta, circles[0])
+  #plota(imageArrayWithAorta)
+  radius = 0
+  result = None
+  # Return the biggest
+  for circ in circles[0,:]:
+#     print ("Detection coords: %f,%f" % (circ[X], circ[Y]))
+#     print ("Real coords: %f,%f" % (circ[X]+boundingBoxMin[X], circ[Y]+boundingBoxMin[Y]))
+    distance = math.sqrt(pow(circ[0]+boundingBoxMin[X]-seed[X],2) + pow(circ[Y]+boundingBoxMin[Y]-seed[Y],2))
+#     print("Ratio: %f. Distance: %f" % (circ[2], d))   
+    if distance < circ[2] and distance > radius:
+      # The circles contains the seed. This is the right one
+      #print (d)
+      radius = distance
+      result = circ
+     
+  return result
+
+def drawCircles(imageArray, circles):
+  for circ in circles: drawCircle(imageArray, circ)
+
+def drawCircle(imageArray, circle):
+  cv2.circle(imageArray,(circle[0],circle[1]),circle[2],(0,0,0),2)
+  #plota(imageArray)
+
+def executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax):
+  #factor = 1.5
+  numberOfIterations=1000
+  maximumRMSError = 0.02
+  
+  curvatureScaling = 1
+  propagationScaling = 1
+
+  # Set thresholds for a bigger/smaller segmented area
+  # stats = getImageStats(imageArray, labelmap)
+  # lower_threshold = stats.GetMean(1)-factor*stats.GetSigma(1)
+  # upper_threshold = stats.GetMean(1)+factor*stats.GetSigma(1)
+  lowerThreshold = 80
+  upperThreshold = 150
+
+
+  originalImage = sitk.ReadImage(imageName)
+  # Select just the slice that we are going to work in
+  slice = boundingBoxMin[Z]
+
+  originalImageSlice = originalImage[:,:,slice]
+  imageArray = adaptIntensities(sitk.GetArrayFromImage(originalImageSlice))
+  circ = detectAorta(imageArray, boundingBoxMin, boundingBoxMax, seedAorta)
+
+  if circ is None:
+    print("Aorta not detected!")
+    return
+
+  # Draw the circle in the original image
+  imageArrayWithAorta = imageArray
+  circ[0] = circ[0]+boundingBoxMin[X]
+  circ[1] = circ[1]+boundingBoxMin[Y]
+  drawCircle(imageArrayWithAorta, circ)
+  #plota(imageArrayWithAorta)
+
+  # Convert the arrays in itk images to work with simpleitk filters
+  image = sitk.GetImageFromArray(imageArrayWithAorta)
+  # Generate seed in the labelmap image (get the first two dimensions in the seed because we are now working in 2D)
+  labelmapSeed = generateSeed(image, seedPA[X:Z])
+
+  labelmap = applyLevelset(image, labelmapSeed, numberOfIterations, curvatureScaling, propagationScaling, lowerThreshold, upperThreshold, maximumRMSError)
 
 
 
+  # Skeleton
+  bin = sitk.BinaryDilate(labelmap > 0)
+  skeleton = sitk.BinaryThinning(bin)
 
-  cimg = cv2.cvtColor(image,cv2.COLOR_GRAY2BGR)
-  if circles.any():
+  skeletonArray = sitk.GetArrayFromImage(skeleton)
+  labelmapArray = sitk.GetArrayFromImage(labelmap)
+  labelmapArray[skeletonArray] = 2  # (label 2 to display results)
 
-    #circles = np.uint16(np.around(circles))
-    for i in circles[0,:]:
-      d = math.sqrt(pow(i[0]-seedY,2) + pow(i[1]-seedX,2))
-      if d < i[2]:
-        # The circles contains the seed. This is the right one
+  # Draw the aorta circle just to display results (label 3)
+  cv2.circle(labelmapArray,(circ[0],circ[1]),circ[2],(3,0,0),1)
 
+  labelmap = sitk.GetImageFromArray(labelmapArray)
 
-
-
-      # draw the outer circle
-      cv2.circle(cimg,(i[0],i[1]),i[2],(0,255,0),2)
-      # draw the center of the circle
-      cv2.circle(cimg,(i[0],i[1]),2,(0,0,255),3)
-
-
-plota(cimg)
-# cv2.imshow('detected circles',cimg)
-# cv2.waitKey(0)
-# cv2.destroyAllWindows()
+  # f = sitk.ScalarToRGBColormapImageFilter()
+  # f.SetColormap(f.Cool)
+  # i = f.Execute(labelmap)
+  # sitk.Show(i)
 
 
+  output2 = sitk.LabelOverlay(image, labelmap)
+  plot(output2)
+  plt.title('Results ' + os.path.basename(imageName))
+  refresh()
+
+  output3 = sitk.LabelOverlay(image, skeleton); plot(output3)
+
+#dataFolder = homepath + '/tempdata/'
+#imageName='12257B_INSP_STD_UIA_COPD.nhdr'
+#labelmapName='12257B_INSP_STD_UIA_COPD-label.nrrd'
+
+#imageName=homepath + '/Dropbox/acil-biomarkers/BiomarkerHackathon/10002K_INSP_STD_BWH_COPD_PulmonaryArteryBifurcationAxial_crop.nhdr'
+
+homepath = os.path.expanduser("~")
+
+aortaMaxRadius = 35
+
+imageName = homepath + '/tempdata/structuresDetection/10002K_INSP_STD_BWH_COPD.nhdr'
+slice = 391
+# XYZ
+seedAorta = [249, 175, slice]
+seedPA = [294,186, slice]
+boundingBoxMin = [178, 141, slice]
+boundingBoxMax = [361, 287, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
 
 
+imageName = homepath + '/tempdata/structuresDetection/10005Q_INSP_STD_NJC_COPD.nhdr'
+slice = 330
+# XYZ
+seedAorta = [225,200, slice]
+seedPA = [268, 203, slice]
+boundingBoxMin = [201,184, slice]
+boundingBoxMax = [324,273, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
 
-# Before the levelSet, construct a small circle with a BinaryDilate operation. Otherwise the results of the levelset are weird
-#labelmap = sitk.BinaryDilate(labelmap, 3)
+imageName = homepath + '/tempdata/structuresDetection/10004O_INSP_STD_BWH_COPD.nhdr'
+slice = 415
+# XYZ
+seedAorta = [223,227, slice]
+seedPA = [272, 246, slice]
+boundingBoxMin = [187,198, slice]
+boundingBoxMax = [298,296, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
 
-#resultImage = applyLevelSet(image,labelmap,curvatureScaling, propagationScaling, iterations, maximumRMSError, lower_threshold, upper_threshold)
-#displayResults(image, labelmap, resultImage, 'My image', 'My labelmap', None, iterations, curvatureScaling, propagationScaling)
-#displayResults(image, labelmap, resultImage, 'My image', 'My labelmap', None, iterations, curvatureScaling, propagationScaling)
+imageName = homepath + '/tempdata/structuresDetection/10006S_INSP_STD_BWH_COPD.nhdr'
+slice = 399
+# XYZ
+seedAorta = [228,202, slice]
+seedPA = [265, 215, slice]
+boundingBoxMin = [184,171, slice]
+boundingBoxMax = [310,268, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
 
-#circleDetectorFilter = sitk.co
+imageName = homepath + '/tempdata/023960002463_INSP_B35f_L1_ECLIPSE.nhdr'
+slice = 215
+# XYZ
+seedAorta = [250,210, slice]
+seedPA = [295, 222, slice]
+boundingBoxMin = [227,188, slice]
+boundingBoxMax = [316,251, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
+
+imageName = homepath + '/tempdata/12257B_INSP_STD_UIA_COPD.nhdr'
+slice = 442
+# XYZ
+seedAorta = [238,220, slice]
+seedPA = [287, 248, slice]
+boundingBoxMin = [216,199, slice]
+boundingBoxMax = [282,442, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
+
+
+imageName = homepath + '/tempdata/10015T_INSP_STD_BWH_COPD.nhdr'
+slice = 458
+# XYZ
+seedAorta = [248,200, slice]
+seedPA = [291, 212, slice]
+boundingBoxMin = [214,169, slice]
+boundingBoxMax = [319,250, slice]
+executePipeline(imageName, seedAorta, seedPA, boundingBoxMin, boundingBoxMax)
 
 
 
@@ -413,7 +433,7 @@ plota(cimg)
 #
 # images = [[0 for i in range(rows)] for j in range(cols)]
 # lsFilter.SetNumberOfIterations(500)
-# img_T1f = sitk.Cast(image, sitk.sitkFloat32)
+# img_T1f = sitk.Cast(imageArray, sitk.sitkFloat32)
 # ls = init_ls
 # niter = 0
 # fig, axes = p.subplots(nrows=rows, ncols=cols)
@@ -421,11 +441,11 @@ plota(cimg)
 #   for j in range(cols):
 #     ls = lsFilter.Execute(ls, img_T1f)
 #     niter += lsFilter.GetNumberOfIterations()
-#     t = "LevelSet after "+str(niter)+" iterations and RMS "+str(lsFilter.GetRMSChange())
+#     t = "LevelSet after "+str(niter)+" iteratiocd CIPns and RMS "+str(lsFilter.GetRMSChange())
 #     #t = "I %i; RMS %f" % (niter, lsFilter.GetRMSChange())
 #     #print(t)
 #     #fig = myshow3d(sitk.LabelOverlay(img_T1_255, ls > 0), zslices=range(idx[2]-zslice_offset,idx[2]+zslice_offset+1,zslice_offset), dpi=20, title=t)
-#     images[i][j] = sitk.GetArrayFromImage(sitk.LabelOverlay(image, ls > 0))
+#     images[i][j] = sitk.GetArrayFromImage(sitk.LabelOverlay(imageArray, ls > 0))
 #     axes[i,j].set_title(t)
 #     axes[i,j].imshow(images[i][j])
 #     p.pause(0.1)
@@ -440,12 +460,6 @@ plota(cimg)
 #     p.pause(0.1)
 
 
-
-
-
-
-
-
-
-
-
+# filename = "/Data/jonieva/tempdata/Cases to fix/10002K_INSP_STD_BWH_COPD_structuresDetection.nhdr"
+# i = sitk.ReadImage(filename)
+# a = sitk.GetArrayFromImage(i)
