@@ -41,6 +41,9 @@ from skimage.util import img_as_ubyte
 
 from skimage import filter
 
+from lxml import etree
+import sklearn
+
 
 def plot(image):
     """ Use Matplotlib to display a simpleITK image (among others)
@@ -161,7 +164,7 @@ def detectAortaSitk(imageArray, boundingBoxMin, boundingBoxMax, seedAorta):
     """
     # Crop the imageArray (2D)
     img = imageArray[boundingBoxMin[Y]:boundingBoxMax[Y], boundingBoxMin[X]:boundingBoxMax[X]]
-    img = cv2.medianBlur(img, 5)
+    #img = cv2.medianBlur(img, 5)
 
     f = sitk.BinaryMorphologicalClosingImageFilter()
     f.SetKernelType(sitk.BinaryMorphologicalClosingImageFilter.Ball)
@@ -207,6 +210,9 @@ def detectAortaSitk(imageArray, boundingBoxMin, boundingBoxMax, seedAorta):
             filteredAccums.append(accums[i])
             filteredRadii.append(radii[i])
 
+    if len(filteredRadii) == 0:
+        # Aorta not found
+        return None
     image2 = color.gray2rgb(image)
 
     # Get the best circle among the selected ones
@@ -242,31 +248,59 @@ def drawCircle(imageArray, circle):
     cv2.circle(imageArray, (circle[0], circle[1]), circle[2], (0, 0, 0), 2)
 
 
-def getSkeletonIntersection(array, seed):
+def getSkeletonIntersection(skeletonArray):
     """ Given a numpy array that represents a structure skeleton (values 0 and 1), try to detect the intersection point
     that is closest to the [X,Y] index stored in "seed"
-    :param array: numpy 2D array with the skeleton
+    :param skeletonArray: numpy 2D array with the skeleton
     :param seed: [X,Y] values of the point that should be the closest one to the candidate intersections.
     :return: tuple with X,Y coordinates of the intersection point (or None if not found a suitable candidate)
     """
     # Get the number of neighbours for each pixel
-    N = np.zeros(array.shape, dtype=int)
-    N[1:-1, 1:-1] += (array[:-2,  :-2]  + array[:-2, 1:-1] + array[:-2, 2:] +
-                      array[1:-1, :-2] + array[1:-1, 2:] + array[2: , :-2] +
-                      array[2:, 1:-1]  + array[2:, 2:])
+    ab = skeletonArray.astype(bool)
+    b = np.zeros(skeletonArray.shape, dtype=int)
 
-    # Keep just the ones that are part of the array
-    N = N * array
+    # First, sum the top-right-bottom-left neighbours
+    b[1:-1, 1:-1] = ab[:-2, 1:-1].astype(int) + ab[1:-1, 2:].astype(int) + \
+                    ab[2:, 1:-1].astype(int) + ab[1:-1, :-2].astype(int)
 
-    # Filter those that have a high connectivity (at least N=4)
-    points = np.where(N > 3)
+    # Add the diagonals that have not a "normal" neighbour in the same direction.
+    # Ex: 0 0    0 1
+    #     0 1    0 1
+    #     YES    NO (because it already exists a neighbour on the right or the bottom)
+    #b[1:-1, 1:-1] += (np.logical_and(ab[2:, 2:], np.logical_not(np.logical_or(ab[1:-1, 2:], ab[2:, 1:-1]))).astype(int))
+
+
+    b[1:-1, 1:-1] += (np.logical_and(ab[:-2, :-2], np.logical_not(np.logical_or(ab[:-2, 1:-1], ab[1:-1, :-2]))).astype(int)) + \
+                     (np.logical_and(ab[:-2:, 2:], np.logical_not(np.logical_or(ab[:-2, 1:-1], ab[1:-1, 2:]))).astype(int)) + \
+                     (np.logical_and(ab[2:, 2:], np.logical_not(np.logical_or(ab[1:-1, 2:], ab[2:, 1:-1]))).astype(int)) + \
+                     (np.logical_and(ab[2:, :-2], np.logical_not(np.logical_or(ab[2:, 1:-1], ab[1:-1, :-2]))).astype(int))
+
+
+    # N[1:-1, 1:-1] += (
+    #                     np.max(1,skeletonArray[:-2,  :-2]  + skeletonArray[1:-1, :-2]) +
+    #                     np.max(1,skeletonArray[1:-1, :-2]  + skeletonArray[2:, :-2]) +
+    #                     np.max(1,skeletonArray[2:, :-2]  + skeletonArray[2:, 1:-1]) +
+    #                     np.max(1,skeletonArray[2:, 1:-1]  + skeletonArray[2:, 2:]) +
+    #                     np.max(1,skeletonArray[2:, 2:]  + skeletonArray[1:-1, 2:]) +
+    #                     np.max(1,skeletonArray[1:-1, 2:] + skeletonArray[-2:, 2:]) +
+    #                     np.max(1,skeletonArray[:-2, 2:]  + skeletonArray[:-2, 1:-1]) +
+    #                     np.max(1,skeletonArray[:-2:, 1:-1]  + skeletonArray[:-2, :-2]))
+
+
+    # Get the top point of the skeleton
+    topPoint = np.argwhere(ab)[0]
+    # Filter those that have a high connectivity (at least b=3)
+    points = np.where(b>=3)
+    #return points[1][0], points[0][0]
+
 
     # Return the closest point to the seed
     # TODO: could "seed" just be replaced by the top point?
     index = -1
     minDistance = sys.maxint
     for i in range(len(points[0])):
-        distance = abs(seed[1]-points[0][i]) + abs(seed[0]-points[1][i])
+        #
+        distance = abs(topPoint[0]-points[0][i]) + abs(topPoint[1]-points[1][i])
         if distance < minDistance:
             minDistance = distance
             index = i
@@ -276,7 +310,8 @@ def getSkeletonIntersection(array, seed):
     return None
 
 
-def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, seedPA, displayResults=True):
+def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedPA, seedAorta, plotImage=True,
+                    displayResults=True, saveImageOutputPath=None):
     """ Execute all the pipeline to calculate the PA:A ratio.
 
     These are the steps that are followed:
@@ -294,6 +329,10 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
     :param boundingBoxMax: bottom-right XYZ coordinate of the 2D slice we will choose as the working slice
     :param seedAorta: XYZ index of a point that is known to be inside the aorta
     :param seedPA: XYZ index of a point that is known to be inside the PA
+    :param plotImage: plot the result image
+    :param displayResults: display the results from PA:A ratio
+    :param saveImageOutputPath: when not None, save a result image in this FOLDER (the name of the file depends on the
+    case and the current date and time)
     :return: tuple with the following information:
         - If everything goes good:
             - Case id
@@ -306,8 +345,6 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
             - Case id
             - Error message
     """
-    # TODO: get seedAorta and seedPA automatically from the bounding box
-
     # factor = 1.5
     numberOfIterations = 1000
     maximumRMSError = 0.02
@@ -328,7 +365,10 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
     slice = boundingBoxMin[Z]
 
     originalImageSlice = originalImage[:, :, slice]
+    # Thresholding
     imageArray = adaptIntensities(sitk.GetArrayFromImage(originalImageSlice))
+    # Smoothing
+    imageArray = cv2.medianBlur(imageArray, 5)
     # circ2 = detectAorta(imageArray, boundingBoxMin, boundingBoxMax, seedAorta)
     circ = detectAortaSitk(imageArray, boundingBoxMin, boundingBoxMax, seedAorta)
 
@@ -351,12 +391,18 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
     labelmap = applyLevelset(image, labelmapSeed, numberOfIterations, curvatureScaling, propagationScaling,
                              lowerThreshold, upperThreshold, maximumRMSError)
 
-    # Skeleton
-    paDilated = sitk.BinaryDilate(labelmap > 0)
+    # Skeleton. First dilate to close holes.
+    #paDilated = sitk.BinaryDilate(labelmap > 0)
+    #paDilated = sitk.BinaryFillhole(labelmap > 0)
+    f = sitk.BinaryDilateImageFilter()
+    f.SetKernelType(f.Ball)
+    f.SetKernelRadius(5)
+    paDilated = f.Execute(labelmap > 0)
+
     skeleton = sitk.BinaryThinning(paDilated)
 
     skeletonArray = sitk.GetArrayFromImage(skeleton)
-    intersection = getSkeletonIntersection(skeletonArray, seedPA)
+    intersection = getSkeletonIntersection(skeletonArray)
 
     # Draw the skeleton and the intersection point
     labelmapArray = sitk.GetArrayFromImage(labelmap)
@@ -381,9 +427,9 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
     # plot(output2)
 
     caseId = os.path.basename(imageFullPath).replace(".nhdr", "")
-    if displayResults:
+    output = sitk.LabelOverlay(image, labelmap)
+    if plotImage:
         # Show the final results
-        output = sitk.LabelOverlay(image, labelmap)
         plot(output)
         plt.title('Results ' + caseId)
         refresh()
@@ -404,11 +450,57 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedAorta, se
         print("Aorta diameter: {0}".format(aortaDiameter))
         print("PA:A ratio: {0}".format(ratio))
 
+    if saveImageOutputPath is not None:
+        plt.savefig(os.path.join(saveImageOutputPath, os.path.basename(imageFullPath)) + '-' +
+                time.strftime("%Y-%m-%d_%H-%M") + '.png')
+        cl()
+
     return caseId, ratio, paDiameter, paLevel, aortaDiameter, [circ[0], circ[1]]
+
 
 def save(imageName):
     plt.savefig(os.path.join(homepath, 'tempdata/results', os.path.basename(imageName)) + '-' +
                 time.strftime("%Y-%m-%d_%H-%M") + '.png')
+    cl()
+
+
+def loadCaseParameters(caseXmlFullPath):
+    """ Load the xml that contains the bounding boxes for a case
+    Returns the bounding boxes and the seeds for PulmonaryArtery structure
+    :param folder:
+    :param caseName:
+    :return:
+    - [X,Y,Z] bounding box top left
+    - [X,Y,Z] bounding box bottom right
+    - [X,Y,Z] seed Pulmonary artery
+    - [X,Y,Z] seed Aorta
+    """
+    with open(caseXmlFullPath) as f:
+        xml = f.read()
+
+    root = etree.fromstring(xml)
+    # Find the node whose Description is PulmonaryArteryAxial
+    e = root.xpath('BoundingBox/Description[text()="PulmonaryArteryAxial"]')
+    if len(e) == 0:
+        raise Exception("PulmonaryArteryAxial node not found in " + caseXmlFullPath)
+    # Get the parent node (BoundingBox)
+    boundingBoxNode = e[0].getparent()
+    # Get the top-left coordinates
+    boundingBoxMin = []
+    for i in boundingBoxNode.findall("Start/value"):
+        boundingBoxMin.append(int(i.text))
+    # Get the bottom-right coordinates (offset from previous one)
+    boundingBoxMax = []
+    index = 0
+    for i in boundingBoxNode.findall("Size/value"):
+        boundingBoxMax.append(int(i.text) + boundingBoxMin[index])
+        index += 1
+    # Calculate seeds as offsets of the bounding boxes
+    seedPA = [boundingBoxMax[0]-30, boundingBoxMax[1]-50, boundingBoxMax[2]]
+    seedAorta = [boundingBoxMin[0]+30, boundingBoxMin[1]+30, boundingBoxMin[2]]
+
+    return boundingBoxMin, boundingBoxMax, seedPA, seedAorta
+
 
 #############################################################################################
 
@@ -424,92 +516,121 @@ np_Z = 0
 homepath = os.path.expanduser("~")
 
 aortaMaxRadius = 35
+paStructureId = "PulmonaryArteryAxial"
 
 
 if __name__ == '__main__':
-    print("main")
+    casesListFile = homepath + "/tempdata/structuresDetection/cases.txt"
+    with open(casesListFile) as f:
+        for case in f.readlines():
+            try:
+                case = case.rstrip()
+                structures = loadCaseParameters("{0}/tempdata/structuresDetection/{1}_structures.xml".format(homepath, case))
+                imageName = "{0}/tempdata/structuresDetection/{1}.nhdr".format(homepath, case)
+                executePipeline(imageName, structures[0], structures[1], structures[2], structures[3], plotImage=True,
+                                displayResults=False, saveImageOutputPath=os.path.join(homepath, "tempdata/results"))
+            except Exception as ex:
+                print("CASE {0} FAILED: ".format(case), ex)
 
 else:
-    print("KK")
+    case = '10015T_INSP_STD_BWH_COPD'
+    imageFullPath = '{0}/tempdata/structuresDetection/{1}.nhdr'.format(homepath, case)
+    structures = loadCaseParameters("{0}/tempdata/structuresDetection/{1}_structures.xml".format(homepath, case))
 
-#
-# Shitty
-imageName = homepath + '/tempdata/023960002463_INSP_B35f_L1_ECLIPSE.nhdr'
-slice = 214
-# XYZ
-seedAorta = [250,210, slice]
-seedPA = [295, 222, slice]
-boundingBoxMin = [228,193, slice]
-boundingBoxMax = [311,251, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
+    boundingBoxMin = structures[0]
+    boundingBoxMax = structures[1]
+    seedPA = structures[2]
+    seedAorta = structures[3]
+
+    executePipeline(imageFullPath, structures[0], structures[1], structures[2], structures[3])
+# slice = 214
+# # XYZ
+# seedAorta = [250,210, slice]
+# seedPA = [295, 222, slice]
+# boundingBoxMin = [228,193, slice]
+# boundingBoxMax = [311,251, slice]
+# executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+# save(imageName)
 
 
-# So so ==> OK aorta (fail skeleton intersection)
-imageName = homepath + '/tempdata/10002K_INSP_STD_BWH_COPD.nhdr'
-slice = 391
-# XYZ
-seedAorta = [249, 175, slice]
-seedPA = [294,186, slice]
-boundingBoxMin = [178, 141, slice]
-boundingBoxMax = [361, 287, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
-
-# WRONG ==> ok
-imageName = homepath + '/tempdata/10005Q_INSP_STD_NJC_COPD.nhdr'
-slice = 325
-# XYZ
-seedAorta = [225,200, slice]
-seedPA = [268, 203, slice]
-boundingBoxMin = [201,170, slice]
-boundingBoxMax = [324,273, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
-
-# OK  ==> aorta is kind of too big
-imageName = homepath + '/tempdata/10004O_INSP_STD_BWH_COPD.nhdr'
-slice = 415
-# XYZ
-seedAorta = [223,227, slice]
-seedPA = [272, 246, slice]
-boundingBoxMin = [187,198, slice]
-boundingBoxMax = [298,296, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
-
-# OK
-imageName = homepath + '/tempdata/10006S_INSP_STD_BWH_COPD.nhdr'
-slice = 399
-# XYZ
-seedAorta = [228,202, slice]
-seedPA = [272, 210, slice]
-boundingBoxMin = [184,171, slice]
-boundingBoxMax = [310,268, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
-
-# Ok
-imageName = homepath + '/tempdata/12257B_INSP_STD_UIA_COPD.nhdr'
-slice = 442
-# XYZ
-seedAorta = [238,220, slice]
-seedPA = [287, 248, slice]
-boundingBoxMin = [216,199, slice]
-boundingBoxMax = [312,273, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
-
-# WRONG ==> OK
-imageName = homepath + '/tempdata/10015T_INSP_STD_BWH_COPD.nhdr'
-slice = 458
-# XYZ
-seedAorta = [248,200, slice]
-seedPA = [291, 212, slice]
-boundingBoxMin = [214,169, slice]
-boundingBoxMax = [319,250, slice]
-executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedAorta, seedPA)
-save(imageName)
+    # #
+    # # Shitty
+    # imageName = homepath + '/tempdata/023960002463_INSP_B35f_L1_ECLIPSE.nhdr'
+    # slice = 214
+    # # XYZ
+    # seedAorta = [250,210, slice]
+    # seedPA = [295, 222, slice]
+    # boundingBoxMin = [228,193, slice]
+    # boundingBoxMax = [311,251, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    #
+    # # So so ==> OK aorta (fail skeleton intersection)
+    # imageName = homepath + '/tempdata/10002K_INSP_STD_BWH_COPD.nhdr'
+    # slice = 391
+    # # XYZ
+    # seedAorta = [249, 175, slice]
+    # seedPA = [294,186, slice]
+    # boundingBoxMin = [178, 141, slice]
+    # boundingBoxMax = [361, 287, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    # # WRONG ==> ok
+    # imageName = homepath + '/tempdata/10005Q_INSP_STD_NJC_COPD.nhdr'
+    # slice = 325
+    # # XYZ
+    # seedAorta = [225,200, slice]
+    # seedPA = [268, 203, slice]
+    # boundingBoxMin = [201,170, slice]
+    # boundingBoxMax = [324,273, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    # # OK  ==> aorta is kind of too big
+    # imageName = homepath + '/tempdata/10004O_INSP_STD_BWH_COPD.nhdr'
+    # slice = 415
+    # # XYZ
+    # seedAorta = [223,227, slice]
+    # seedPA = [272, 246, slice]
+    # boundingBoxMin = [187,198, slice]
+    # boundingBoxMax = [298,296, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    # # OK
+    # imageName = homepath + '/tempdata/10006S_INSP_STD_BWH_COPD.nhdr'
+    # slice = 399
+    # # XYZ
+    # seedAorta = [228,202, slice]
+    # seedPA = [272, 210, slice]
+    # boundingBoxMin = [184,171, slice]
+    # boundingBoxMax = [310,268, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    # # Ok
+    # imageName = homepath + '/tempdata/12257B_INSP_STD_UIA_COPD.nhdr'
+    # slice = 442
+    # # XYZ
+    # seedAorta = [238,220, slice]
+    # seedPA = [287, 248, slice]
+    # boundingBoxMin = [216,199, slice]
+    # boundingBoxMax = [312,273, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
+    #
+    # # WRONG ==> OK
+    # imageName = homepath + '/tempdata/10015T_INSP_STD_BWH_COPD.nhdr'
+    # slice = 458
+    # # XYZ
+    # seedAorta = [248,200, slice]
+    # seedPA = [291, 212, slice]
+    # boundingBoxMin = [214,169, slice]
+    # boundingBoxMax = [319,250, slice]
+    # executePipeline(imageName, boundingBoxMin, boundingBoxMax, seedPA, seedAorta)
+    # save(imageName)
 
 
 
