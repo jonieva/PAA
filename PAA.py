@@ -44,6 +44,7 @@ from skimage import filter
 from lxml import etree
 import sklearn
 
+from cipObjectDetector import cipObjectDetector
 
 def plot(image):
     """ Use Matplotlib to display a simpleITK image (among others)
@@ -285,11 +286,11 @@ def getSkeletonIntersection(skeletonArray, boundingBoxMin, boundingBoxMax):
                      (np.logical_and(ab[2:, 2:], np.logical_not(np.logical_or(ab[1:-1, 2:], ab[2:, 1:-1]))).astype(int)) + \
                      (np.logical_and(ab[2:, :-2], np.logical_not(np.logical_or(ab[2:, 1:-1], ab[1:-1, :-2]))).astype(int))
 
-
-
+    # Get the point that has the lower y coordinate
     topPoint = np.argwhere(ab)[0]
 
-    # Filter those that have a high connectivity (at least b=3)
+    # Filter those that have a high connectivity (at least b=3) and are part od the skeleton
+    b[ab == False] = 0
     points = np.where(b >= 3)
 
     # Return the closest point to the top point of the skeleton
@@ -307,15 +308,13 @@ def getSkeletonIntersection(skeletonArray, boundingBoxMin, boundingBoxMax):
     return None, None
 
 
-def calculatePAADiameter(paLabelmapArray, paBifurcationPoint, topSkeletonPoint):
-    """ TODO: CHANGE THIS
-    Calculate the PA:A ratio. We draw a line from the intersection point to the top point of the skeleton, and
-    then drawing a line normal to it in the middle point.
-    :param aortaCircle: X,Y,radious of the aorta circle
+def calculatePADiameter(paLabelmapArray, paBifurcationPoint, topSkeletonPoint):
+    """
+    Get the diameter and the intersection points for the pulmonary artery
     :param paLabelmapArray: labelmap of the PA (numpy array)
     :param paBifurcationPoint: X,Y coordinates from PA bifurcation
     :param topSkeletonPoint: X,Y coordinates with the point is on the top of the PA skeleton
-    :return: tuple wi
+    :return: tuple (diameter, (x,y) for left intersection, (x,y) for right intersection)
     """
     # TODO: change doc
     # Calculate the middle point between the top of the skeleton and the bifurcation point
@@ -328,9 +327,9 @@ def calculatePAADiameter(paLabelmapArray, paBifurcationPoint, topSkeletonPoint):
     # Calculate the line equations for a perpendicular line that crosses the middle point.
     # To that end, we have to calculate first the equations of the line that connect the two points
     if topSkeletonPoint[0] == paBifurcationPoint[0]:
-        # Both points are in the same vertical line. The perpendicular line is horizontal (b = x0; m=0)
+        # Both points are in the same vertical line. The perpendicular line is horizontal (b = x0; m=0) in the mid point
         mp = 0
-        bp = topSkeletonPoint[0]
+        bp = cy
     elif topSkeletonPoint[1] == paBifurcationPoint[1]:
         # Error case (horizontal line). Both points shouldn't be in the same y coordinate (the perpendicular line would be vertical)
         raise Exception("The PA bifurcation point and the top skeleton point have the same y coordinate")
@@ -350,9 +349,9 @@ def calculatePAADiameter(paLabelmapArray, paBifurcationPoint, topSkeletonPoint):
     #return paDiameter / (aortaCircle[2] * 2)
     return paDiameter, p0, p1
 
-def getIntersectionPoints(labelMap, point, m, b, delta):
+def getIntersectionPoints(paLabelmapArray, point, m, b, delta):
     """ Measure the diameter of an structure that intersects with a line of equation y = mx+b in at least 2 points
-    :param labelMap: labelMap image where the values of the structure have a value != 0
+    :param paLabelmapArray: labelMap image where the values of the structure have a value != 0
     :param point: X,Y coords of the "center" of the structure
     :param m: slope of the line
     :param b: intercept of the line
@@ -365,7 +364,7 @@ def getIntersectionPoints(labelMap, point, m, b, delta):
     sampleX = point[0] - sampleX
     sampleY = np.rint(m * sampleX + b)
     sampleY = sampleY.astype(np.int)
-    sample = labelMap[sampleY, sampleX]
+    sample = paLabelmapArray[sampleY, sampleX]
     # Get the maximum index (in case there is more than one intersection point)
     r = np.where(sample == 0)
     if len(r[0]) == 0:
@@ -381,7 +380,7 @@ def getIntersectionPoints(labelMap, point, m, b, delta):
     sampleX = sampleX + point[0]
     sampleY = np.rint(m * sampleX + b)
     sampleY = sampleY.astype(np.int)
-    sample = labelMap[sampleY, sampleX]
+    sample = paLabelmapArray[sampleY, sampleX]
 
     # Get the minimum index (in case there is more than one intersection point)
     r = np.where(sample == 0)
@@ -401,7 +400,7 @@ def distance(p0, p1):
     return math.sqrt((p0[0] - p1[0])**2 + (p0[1] - p1[1])**2)
 
 
-def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedPA, seedAorta, plotImage=True, saveImageOutputPath=None):
+def executePipeline(originalImage, boundingBoxMin, boundingBoxMax, seedPA, seedAorta, plotImage=True, saveImageOutputPath=None):
     """ Execute all the pipeline to calculate the PA:A ratio.
 
     These are the steps that are followed:
@@ -414,7 +413,7 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedPA, seedA
     6) Measure the ratio of the PA (at the moment just 15 pixels beneath the intersection point in the skeleton). The
     ratio will be measured in an horizontal line at this point.
     7) Calculate the PA:A ratio
-    :param imageFullPath: full path to the original 3D volume
+    :param originalImage: simpleITK image
     :param boundingBoxMin: top-left XYZ coordinate of the 2D slice that we will choose as the working slice
     :param boundingBoxMax: bottom-right XYZ coordinate of the 2D slice we will choose as the working slice
     :param seedAorta: XYZ index of a point that is known to be inside the aorta
@@ -450,7 +449,7 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedPA, seedA
     upperThreshold = 170
 
 
-    originalImage = sitk.ReadImage(imageFullPath)
+    # originalImage = sitk.ReadImage(imageFullPath)
     # Select just the slice that we are going to work in
     slice = boundingBoxMin[Z]
 
@@ -495,7 +494,7 @@ def executePipeline(imageFullPath, boundingBoxMin, boundingBoxMax, seedPA, seedA
     paBifurcationPoint, topSkeletonPoint = getSkeletonIntersection(skeletonArray, boundingBoxMin, boundingBoxMax)
 
     labelmapArray = sitk.GetArrayFromImage(labelmap)
-    (paDiameter, pa0, pa1) = calculatePAADiameter(labelmapArray, paBifurcationPoint, topSkeletonPoint)
+    (paDiameter, pa0, pa1) = calculatePADiameter(labelmapArray, paBifurcationPoint, topSkeletonPoint)
 
     # Draw the skeleton and the intersection point
 
@@ -594,6 +593,19 @@ def loadCaseParameters(caseXmlFullPath):
 
     return boundingBoxMin, boundingBoxMax, seedPA, seedAorta
 
+def loadParametersFromAutomaticDetector(sitkImage):
+    detector = cipObjectDetector(verbose=True)
+    detector.loadVolumeFromSITKImage(sitkImage)
+    detector.loadCascade(os.path.join(homepath, "Projects/acil/acil_python/ObjectDetection/Detectors/ChestCTPulmonaryArteryAxial.xml"))
+    coords = detector.detect(useLocationConstraints=True)
+    boundingBoxMin = [int(i) for i in coords[:3]]
+    boundingBoxMax = [int(i) for i in coords[3:]]
+    # Calculate seeds as offsets of the bounding boxes
+    seedPA = [boundingBoxMax[0]-30, boundingBoxMax[1]-50, boundingBoxMax[2]]
+    seedAorta = [boundingBoxMin[0]+30, boundingBoxMin[1]+30, boundingBoxMin[2]]
+
+    return boundingBoxMin, boundingBoxMax, seedPA, seedAorta
+
 
 #############################################################################################
 
@@ -619,23 +631,31 @@ if __name__ == '__main__':
             try:
                 case = case.rstrip()
                 structures = loadCaseParameters("{0}/tempdata/structuresDetection/{1}_structures.xml".format(homepath, case))
-                imageName = "{0}/tempdata/structuresDetection/{1}.nhdr".format(homepath, case)
-                executePipeline(imageName, structures[0], structures[1], structures[2], structures[3], plotImage=True,
+                imageFullPath = "{0}/tempdata/structuresDetection/{1}.nhdr".format(homepath, case)
+                image = sitk.ReadImage(imageFullPath)
+                #detector.loadVolumeFromSITKImage(image)
+                structures = loadParametersFromAutomaticDetector(image)
+                executePipeline(image, structures[0], structures[1], structures[2], structures[3], plotImage=True,
                                 saveImageOutputPath=os.path.join(homepath, "tempdata/results"))
             except Exception as ex:
                 print("CASE {0} FAILED: ".format(case), ex)
 
-else:
-    case = '10047G_INSP_STD_BWH_COPD'
-    imageFullPath = '{0}/tempdata/structuresDetection/{1}.nhdr'.format(homepath, case)
-    structures = loadCaseParameters("{0}/tempdata/structuresDetection/{1}_structures.xml".format(homepath, case))
+# else:
+#     case = '10047G_INSP_STD_BWH_COPD'
+#     imageFullPath = '{0}/tempdata/structuresDetection/{1}.nhdr'.format(homepath, case)
+#     image = sitk.ReadImage(imageFullPath)
+#     #structures = loadCaseParameters("{0}/tempdata/structuresDetection/{1}_structures.xml".format(homepath, case))
+#
+#     structures = loadParametersFromAutomaticDetector(image)
+#
+#     boundingBoxMin = structures[0]
+#     boundingBoxMax = structures[1]
+#     seedPA = structures[2]
+#     seedAorta = structures[3]
+#
+#     executePipeline(image, structures[0], structures[1], structures[2], structures[3])
 
-    boundingBoxMin = structures[0]
-    boundingBoxMax = structures[1]
-    seedPA = structures[2]
-    seedAorta = structures[3]
 
-    executePipeline(imageFullPath, structures[0], structures[1], structures[2], structures[3])
 # slice = 214
 # # XYZ
 # seedAorta = [250,210, slice]
